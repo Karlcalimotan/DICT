@@ -25,7 +25,7 @@ export default function ModelConnector({
     activePredictionLogs: []
   });
 
-  const [inputUrl, setInputUrl] = useState<string>('');
+  const [inputUrl, setInputUrl] = useState<string>('/model/');
   const [webcamEnabled, setWebcamEnabled] = useState<boolean>(false);
   const [cameraLoading, setCameraLoading] = useState<boolean>(false);
   const [predictions, setPredictions] = useState<PredictionMap[]>([]);
@@ -104,6 +104,25 @@ export default function ModelConnector({
     };
   }, []);
 
+  // Load model automatically when CDN libraries are ready
+  useEffect(() => {
+    if (isCdnLoaded) {
+      loadTeachableModel('/model/');
+    }
+  }, [isCdnLoaded]);
+
+  // Sync the webcam stream with the video element once it mounts
+  useEffect(() => {
+    if (webcamEnabled && videoRef.current && webcamStreamRef.current) {
+      try {
+        videoRef.current.srcObject = webcamStreamRef.current;
+        videoRef.current.play().catch(e => console.error("Video play failed:", e));
+      } catch (e) {
+        console.error("Failed to assign stream to video:", e);
+      }
+    }
+  }, [webcamEnabled, videoRef.current]);
+
   const addLog = (tag: string, text: string) => {
     const timestamp = new Date().toLocaleTimeString();
     const logStr = `[${timestamp}] (${tag}) ${text}`;
@@ -133,17 +152,17 @@ export default function ModelConnector({
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       webcamStreamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play();
-      }
       setWebcamEnabled(true);
       onWebcamStatusChange(true);
       addLog('Webcam', 'Camera stream active.');
       addLog('Status', useMotionFallback ? 'Running on Pixel motion detector' : 'Awaiting Teachable Machine predictions');
     } catch (err: any) {
-      addLog('Error', 'Camera access blocked or not available.');
-      alert('Could not start webcam. Please grant camera permission in your browser.');
+      addLog('Error', `Camera block: ${err.name || err.message || err}`);
+      let errorMsg = 'Could not start webcam. Please grant camera permission in your browser.';
+      if (!window.isSecureContext) {
+        errorMsg = '⚠️ INSECURE CONTEXT: Web browsers block camera access unless served over HTTPS or localhost (127.0.0.1). Please open the app via http://localhost:3000/ instead of an external IP.';
+      }
+      alert(errorMsg);
       console.error(err);
     } finally {
       setCameraLoading(false);
@@ -216,6 +235,29 @@ export default function ModelConnector({
         }
       });
 
+      // Override mappings if specific classes are present in the loaded model metadata (case-insensitive check)
+      const nonchalantClass = classNames.find(c => c.toLowerCase() === 'nonchalant');
+      const jumpClass = classNames.find(c => c.toLowerCase() === 'jump');
+      if (nonchalantClass) {
+        foundJump = nonchalantClass;
+      } else if (jumpClass) {
+        foundJump = jumpClass;
+      }
+
+      const jokingClass = classNames.find(c => c.toLowerCase() === 'joking');
+      const crouchClass = classNames.find(c => c.toLowerCase() === 'crouch');
+      if (jokingClass) {
+        foundCrouch = jokingClass;
+      } else if (crouchClass) {
+        foundCrouch = crouchClass;
+      }
+
+      // Set the first non-jump, non-crouch class as neutral/idle if available
+      const possibleNeutral = classNames.find(c => c !== foundJump && c !== foundCrouch);
+      if (possibleNeutral) {
+        foundIdle = possibleNeutral;
+      }
+
       setModelConfig(prev => ({
         ...prev,
         modelUrl: formattedUrl,
@@ -246,7 +288,7 @@ export default function ModelConnector({
       if (!webcamEnabled) return;
 
       const video = videoRef.current;
-      if (video && video.readyState === video.HAVE_CURRENT_DATA) {
+      if (video && video.readyState >= video.HAVE_CURRENT_DATA) {
         // Choose between True Teachable Machine estimation OR Pixel-grid motion estimation
         if (useMotionFallbackRef.current) {
           detectMotion(video);
@@ -381,10 +423,10 @@ export default function ModelConnector({
 
       setPredictions(items);
 
-      // Find probability values for our mapped settings labels
+      // Find probability values for our mapped settings labels (case-insensitive and trimmed)
       const config = activeConfigRef.current;
-      const jumpData = items.find(i => i.className === config.jumpClass);
-      const crouchData = items.find(i => i.className === config.crouchClass);
+      const jumpData = items.find(i => i.className.toLowerCase().trim() === config.jumpClass.toLowerCase().trim());
+      const crouchData = items.find(i => i.className.toLowerCase().trim() === config.crouchClass.toLowerCase().trim());
 
       const jumpProb = jumpData ? jumpData.probability : 0;
       const crouchProb = crouchData ? crouchData.probability : 0;
@@ -409,6 +451,38 @@ export default function ModelConnector({
     } catch (e) {
       console.error('Error during prediction', e);
     }
+  };
+
+  const simulateEmotion = (actionType: 'jump' | 'crouch' | 'neutral') => {
+    const jumpName = modelConfig.jumpClass;
+    const crouchName = modelConfig.crouchClass;
+
+    const simulatedPreds = modelConfig.classes.map(className => {
+      let probability = 0.05; // background noise
+      if (actionType === 'jump' && className === jumpName) {
+        probability = 0.95;
+      } else if (actionType === 'crouch' && className === crouchName) {
+        probability = 0.95;
+      } else if (actionType === 'neutral' && className !== jumpName && className !== crouchName) {
+        probability = 0.90;
+      }
+      return { className, probability };
+    });
+
+    // If there is no neutral class, ensure active actions are cleared out on release/reset
+    if (actionType === 'neutral' && !modelConfig.classes.some(c => c !== jumpName && c !== crouchName)) {
+      simulatedPreds.forEach(p => p.probability = 0.05);
+    }
+
+    let nextAction: 'jump' | 'crouch' | 'none' = 'none';
+    if (actionType === 'jump') nextAction = 'jump';
+    else if (actionType === 'crouch') nextAction = 'crouch';
+
+    addLog('Simulated AI', `Simulating ${actionType.toUpperCase()} input`);
+
+    setPredictions(simulatedPreds);
+    setDetectedAction(nextAction);
+    onTriggerAction(nextAction);
   };
 
   const SharpCorners = () => (
@@ -508,6 +582,45 @@ export default function ModelConnector({
                 {cameraLoading ? 'INIT PROCESS...' : webcamEnabled ? 'TERMINATE CAPTURE' : 'ACTIVATE CAMERA'}
               </span>
             </button>
+          </div>
+
+          {/* TELEMETRY SIMULATOR PANEL */}
+          <div className="mt-2 bg-zinc-950 p-4 border border-white/10 flex flex-col gap-2.5">
+            <span className="text-[10px] font-bold text-green-400 uppercase tracking-wider flex items-center gap-1.5">
+              🧪 TELEMETRY SIMULATOR
+            </span>
+            <p className="text-[9px] text-zinc-500 font-sans leading-normal">
+              If the webcam is unavailable or hard to align, use the interactive mock buttons below to simulate model classification and verify runner responses:
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => {
+                  simulateEmotion('jump');
+                  setTimeout(() => {
+                    simulateEmotion('neutral');
+                  }, 600);
+                }}
+                className="py-2 px-3 bg-zinc-900 border border-white/15 hover:border-white/40 text-white font-bold text-[9px] uppercase tracking-wider cursor-pointer active:bg-zinc-800 transition-all font-sans"
+              >
+                Simulate {modelConfig.jumpClass.toUpperCase()} (Jump)
+              </button>
+              <button
+                onMouseDown={() => simulateEmotion('crouch')}
+                onMouseUp={() => simulateEmotion('neutral')}
+                onMouseLeave={() => simulateEmotion('neutral')}
+                onTouchStart={(e) => {
+                  e.preventDefault();
+                  simulateEmotion('crouch');
+                }}
+                onTouchEnd={(e) => {
+                  e.preventDefault();
+                  simulateEmotion('neutral');
+                }}
+                className="py-2 px-3 bg-zinc-900 border border-white/15 hover:border-white/40 text-white font-bold text-[9px] uppercase tracking-wider cursor-pointer active:bg-zinc-800 transition-all font-sans"
+              >
+                Simulate {modelConfig.crouchClass.toUpperCase()} (Crouch - Hold)
+              </button>
+            </div>
           </div>
         </div>
 
@@ -670,7 +783,7 @@ export default function ModelConnector({
               REAL-TIME SIGNAL TELEMETRY
             </span>
 
-            {webcamEnabled && predictions.length > 0 ? (
+            {predictions.length > 0 ? (
               <div className="space-y-2 text-[10px]">
                 {predictions.map((p) => {
                   const probPercent = Math.floor(p.probability * 100);
@@ -710,7 +823,7 @@ export default function ModelConnector({
               </div>
             ) : (
               <span className="text-[9px] text-zinc-600 block text-center py-1 italic">
-                {webcamEnabled ? 'ENGAGING SENSOR LOOPS...' : 'AWAITING OPTSTREAM TELEMETRY'}
+                {webcamEnabled ? 'ENGAGING SENSOR LOOPS...' : 'AWAITING OPTSTREAM TELEMETRY (OR USE SIMULATOR BELOW)'}
               </span>
             )}
           </div>
