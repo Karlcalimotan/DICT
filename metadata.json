@@ -1,0 +1,6 @@
+{
+  "name": "Teachable Platformer",
+  "description": "An 8-bit retro platformer controlled by webcam gestures using Google Teachable Machine models.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
